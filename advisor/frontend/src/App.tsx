@@ -1,0 +1,580 @@
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Chessboard } from 'react-chessboard'
+import type { PieceDropHandlerArgs, SquareHandlerArgs } from 'react-chessboard'
+import {
+  analyzeBoardStream,
+  detectBoard,
+  type AnalyzeResult,
+  type Turn,
+} from './api'
+import {
+  getLegalTargets,
+  normalizeFen,
+  playLegalMove,
+  startingFen,
+  type LegalTarget,
+} from './fen'
+import './App.css'
+
+type Status =
+  | { kind: 'idle'; message?: string }
+  | { kind: 'loading'; message: string }
+  | { kind: 'error'; message: string }
+  | { kind: 'ok'; message: string }
+
+type Orientation = 'white' | 'black'
+
+type BoardSnapshot = {
+  fen: string
+  turn: Turn
+  lastPlayed: string | null
+}
+
+const MAX_THINK_S = 10
+
+function turnLabel(turn: Turn): string {
+  return turn === 'white' ? 'Trắng' : 'Đen'
+}
+
+function buildOptionStyles(
+  selected: string | null,
+  targets: LegalTarget[],
+): Record<string, React.CSSProperties> {
+  const styles: Record<string, React.CSSProperties> = {}
+  if (selected) {
+    styles[selected] = {
+      background: 'rgba(61, 220, 132, 0.45)',
+    }
+  }
+  for (const t of targets) {
+    styles[t.to] = t.capture
+      ? {
+          background:
+            'radial-gradient(circle, transparent 58%, rgba(61, 220, 132, 0.85) 60%, rgba(61, 220, 132, 0.85) 78%, transparent 80%)',
+        }
+      : {
+          background:
+            'radial-gradient(circle, rgba(61, 220, 132, 0.85) 22%, transparent 24%)',
+        }
+  }
+  return styles
+}
+
+export default function App() {
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  const [fen, setFen] = useState(startingFen())
+  const [turn, setTurn] = useState<Turn>('white')
+  const [orientation, setOrientation] = useState<Orientation>('white')
+  const [analysis, setAnalysis] = useState<AnalyzeResult | null>(null)
+  const [status, setStatus] = useState<Status>({ kind: 'idle' })
+  const [dragOver, setDragOver] = useState(false)
+  const [lastPlayed, setLastPlayed] = useState<string | null>(null)
+  const [selectedSquare, setSelectedSquare] = useState<string | null>(null)
+  const [moveTargets, setMoveTargets] = useState<LegalTarget[]>([])
+  const [thinkProgress, setThinkProgress] = useState(0)
+  const [thinking, setThinking] = useState(false)
+  const [history, setHistory] = useState<BoardSnapshot[]>([])
+
+  const boardFen = useMemo(() => normalizeFen(fen, turn), [fen, turn])
+  const analyzeSeq = useRef(0)
+  const abortRef = useRef<AbortController | null>(null)
+  const canUndo = history.length > 0
+
+  const squareStyles = useMemo(() => {
+    const styles = buildOptionStyles(selectedSquare, moveTargets)
+    if (analysis) {
+      styles[analysis.from_square] = {
+        ...(styles[analysis.from_square] || {}),
+        boxShadow: 'inset 0 0 0 3px rgba(61, 220, 132, 0.55)',
+      }
+      styles[analysis.to_square] = {
+        ...(styles[analysis.to_square] || {}),
+        boxShadow: 'inset 0 0 0 3px rgba(61, 220, 132, 0.55)',
+      }
+    }
+    return styles
+  }, [selectedSquare, moveTargets, analysis])
+
+  const arrows = useMemo(() => {
+    if (!analysis) return []
+    return [
+      {
+        startSquare: analysis.from_square,
+        endSquare: analysis.to_square,
+        color: 'rgba(61, 220, 132, 0.92)',
+      },
+    ]
+  }, [analysis])
+
+  function clearSelection() {
+    setSelectedSquare(null)
+    setMoveTargets([])
+  }
+
+  function selectSquare(square: string) {
+    const targets = getLegalTargets(fen, turn, square)
+    if (!targets.length) {
+      clearSelection()
+      return false
+    }
+    setSelectedSquare(square)
+    setMoveTargets(targets)
+    return true
+  }
+
+  function stopAnalyze() {
+    abortRef.current?.abort()
+    abortRef.current = null
+  }
+
+  async function runAnalyze(overrides?: { fen?: string; turn?: Turn; note?: string }) {
+    const nextTurn = overrides?.turn ?? turn
+    const nextFen = normalizeFen(overrides?.fen ?? fen, nextTurn)
+    const seq = ++analyzeSeq.current
+
+    stopAnalyze()
+    const controller = new AbortController()
+    abortRef.current = controller
+
+    setThinking(true)
+    setThinkProgress(0)
+    setStatus({
+      kind: 'loading',
+      message: 'Stockfish đang suy nghĩ 0→10s…',
+    })
+
+    try {
+      const final = await analyzeBoardStream(
+        { fen: nextFen, turn: nextTurn, max_time_s: MAX_THINK_S },
+        (update) => {
+          if (seq !== analyzeSeq.current) return
+          // Only update suggestion — never overwrite board while user may already move on.
+          setAnalysis(update)
+          const elapsed = update.elapsed_ms ?? 0
+          const maxMs = update.max_ms ?? MAX_THINK_S * 1000
+          setThinkProgress(Math.min(100, (elapsed / maxMs) * 100))
+          setStatus({
+            kind: 'loading',
+            message: `Đang suy nghĩ ${(elapsed / 1000).toFixed(1)}s / ${MAX_THINK_S}s — gợi ý ${update.best_move_san} (depth ${update.depth})`,
+          })
+        },
+        controller.signal,
+      )
+
+      if (seq !== analyzeSeq.current) return null
+      setThinking(false)
+      setThinkProgress(100)
+      if (!final) {
+        setStatus({ kind: 'error', message: 'Không nhận được gợi ý từ Stockfish.' })
+        return null
+      }
+      setAnalysis(final)
+      setStatus({
+        kind: 'ok',
+        message:
+          overrides?.note ??
+          `Đến lượt ${turnLabel(final.turn)} — ${final.best_move_san} (depth ${final.depth})`,
+      })
+      return final
+    } catch (err) {
+      if (seq !== analyzeSeq.current) return null
+      if (err instanceof DOMException && err.name === 'AbortError') return null
+      setThinking(false)
+      setStatus({
+        kind: 'error',
+        message: err instanceof Error ? err.message : 'Phân tích thất bại.',
+      })
+      return null
+    }
+  }
+
+  function applyPlayedMove(source: string, target: string): boolean {
+    const played = playLegalMove(fen, turn, source, target)
+    if (!played) return false
+
+    // Save current position so user can undo a misclick.
+    setHistory((prev) => [...prev, { fen, turn, lastPlayed }])
+
+    // Invalidate in-flight updates + abort immediately — user can move anytime.
+    analyzeSeq.current += 1
+    stopAnalyze()
+    setFen(played.fen)
+    setTurn(played.turn)
+    setLastPlayed(played.san)
+    setAnalysis(null)
+    setThinkProgress(0)
+    clearSelection()
+    void runAnalyze({
+      fen: played.fen,
+      turn: played.turn,
+      note: `Bạn đi ${played.san} → đến lượt ${turnLabel(played.turn)}.`,
+    })
+    return true
+  }
+
+  function undoMove() {
+    if (history.length === 0) return
+    const prev = history[history.length - 1]
+    setHistory((h) => h.slice(0, -1))
+
+    analyzeSeq.current += 1
+    stopAnalyze()
+    setFen(prev.fen)
+    setTurn(prev.turn)
+    setLastPlayed(prev.lastPlayed)
+    setAnalysis(null)
+    setThinkProgress(0)
+    clearSelection()
+    void runAnalyze({
+      fen: prev.fen,
+      turn: prev.turn,
+      note: prev.lastPlayed
+        ? `Đã hoàn tác — quay lại sau nước ${prev.lastPlayed}.`
+        : 'Đã hoàn tác nước vừa đi.',
+    })
+  }
+
+  function resetBoard() {
+    const start = startingFen()
+    stopAnalyze()
+    analyzeSeq.current += 1
+    setFen(start)
+    setTurn('white')
+    setOrientation('white')
+    setAnalysis(null)
+    setLastPlayed(null)
+    setHistory([])
+    setThinkProgress(0)
+    clearSelection()
+    void runAnalyze({
+      fen: start,
+      turn: 'white',
+      note: 'Reset — đến lượt Trắng, đang gợi ý…',
+    })
+  }
+
+  async function handleFile(file: File | null | undefined) {
+    if (!file) return
+    if (!file.type.startsWith('image/')) {
+      setStatus({ kind: 'error', message: 'Chỉ nhận file ảnh (PNG, JPG, WEBP, GIF…).' })
+      return
+    }
+
+    setPreviewUrl((prev) => {
+      if (prev?.startsWith('blob:')) URL.revokeObjectURL(prev)
+      return URL.createObjectURL(file)
+    })
+    setAnalysis(null)
+    setLastPlayed(null)
+    setHistory([])
+    clearSelection()
+    stopAnalyze()
+    setStatus({ kind: 'loading', message: 'Đang nhận diện bàn cờ & bên đi…' })
+
+    try {
+      const result = await detectBoard(file)
+      setFen(result.fen)
+      setTurn(result.turn_guess)
+      setOrientation(result.orientation === 'black' ? 'black' : 'white')
+      setHistory([])
+
+      if (result.board_preview) {
+        setPreviewUrl((prev) => {
+          if (prev?.startsWith('blob:')) URL.revokeObjectURL(prev)
+          return result.board_preview!
+        })
+      }
+
+      if (!result.is_valid) {
+        setStatus({
+          kind: 'error',
+          message: 'Nhận diện lệch — upload lại ảnh rõ hơn hoặc chọn quân rồi đi nước hợp lệ.',
+        })
+        return
+      }
+
+      await runAnalyze({
+        fen: result.fen,
+        turn: result.turn_guess,
+        note: `Đến lượt ${turnLabel(result.turn_guess)} — gợi ý sau khi suy nghĩ xong.`,
+      })
+    } catch (err) {
+      setStatus({
+        kind: 'error',
+        message: err instanceof Error ? err.message : 'Không nhận diện được bàn cờ.',
+      })
+    }
+  }
+
+  function onSquareClick({ square }: SquareHandlerArgs) {
+    if (selectedSquare) {
+      if (square === selectedSquare) {
+        clearSelection()
+        return
+      }
+
+      const isTarget = moveTargets.some((t) => t.to === square)
+      if (isTarget) {
+        const ok = applyPlayedMove(selectedSquare, square)
+        if (!ok) {
+          setStatus({
+            kind: 'error',
+            message: `Nước không hợp lệ. Đang đến lượt ${turnLabel(turn)}.`,
+          })
+          clearSelection()
+        }
+        return
+      }
+
+      if (selectSquare(square)) return
+      clearSelection()
+      return
+    }
+
+    selectSquare(square)
+  }
+
+  function onPieceDrop({ sourceSquare, targetSquare }: PieceDropHandlerArgs): boolean {
+    if (!targetSquare || sourceSquare === targetSquare) return false
+    const ok = applyPlayedMove(sourceSquare, targetSquare)
+    if (!ok) {
+      setStatus({
+        kind: 'error',
+        message: `Nước không hợp lệ. Đang đến lượt ${turnLabel(turn)}.`,
+      })
+    }
+    return ok
+  }
+
+  function flipBoard() {
+    setOrientation((prev) => (prev === 'white' ? 'black' : 'white'))
+  }
+
+  function changeTurn(next: Turn) {
+    if (next === turn) return
+    setTurn(next)
+    setAnalysis(null)
+    clearSelection()
+    void runAnalyze({ fen, turn: next })
+  }
+
+  const handleFileRef = useRef(handleFile)
+  handleFileRef.current = handleFile
+
+  useEffect(() => {
+    function onPaste(event: ClipboardEvent) {
+      const items = event.clipboardData?.items
+      if (!items?.length) return
+
+      for (const item of items) {
+        if (!item.type.startsWith('image/')) continue
+        const file = item.getAsFile()
+        if (!file) continue
+
+        event.preventDefault()
+        const named =
+          file.name && file.name !== 'image.png'
+            ? file
+            : new File([file], `clipboard-${Date.now()}.png`, {
+                type: file.type || 'image/png',
+              })
+        void handleFileRef.current(named)
+        return
+      }
+    }
+
+    window.addEventListener('paste', onPaste)
+    return () => {
+      window.removeEventListener('paste', onPaste)
+      stopAnalyze()
+    }
+  }, [])
+
+  const elapsedLabel = analysis?.elapsed_ms != null
+    ? `${(analysis.elapsed_ms / 1000).toFixed(1)}s`
+    : thinking
+      ? '…'
+      : '0s'
+
+  return (
+    <div className="app">
+      <header className="topbar">
+        <div className="brand">
+          <h1 className="brand-mark">
+            Move <span>Advisor</span>
+          </h1>
+          <p className="brand-sub">
+            ⌘V ảnh → bấm quân → bấm ô — Stockfish tự suy nghĩ 0→10s và cập nhật mũi tên.
+          </p>
+        </div>
+        <div className="badge">Tự động 0→10s</div>
+      </header>
+
+      <main className="workspace">
+        <section className="panel">
+          <h2>Ảnh bàn cờ</h2>
+          <div
+            className={`upload-zone ${dragOver ? 'dragover' : ''}`}
+            onDragOver={(e) => {
+              e.preventDefault()
+              setDragOver(true)
+            }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={(e) => {
+              e.preventDefault()
+              setDragOver(false)
+              void handleFile(e.dataTransfer.files?.[0])
+            }}
+          >
+            <input
+              type="file"
+              accept="image/*"
+              onChange={(e) => void handleFile(e.target.files?.[0])}
+            />
+            <div className="upload-copy">
+              <strong>Kéo thả, chọn ảnh, hoặc ⌘V</strong>
+              <p>Screenshot Chess.com / Lichess</p>
+            </div>
+          </div>
+
+          {previewUrl ? (
+            <div className="preview">
+              <img src={previewUrl} alt="Ảnh bàn cờ đã upload" />
+            </div>
+          ) : null}
+
+          {status.message ? (
+            <div
+              className={`status ${
+                status.kind === 'error'
+                  ? 'error'
+                  : status.kind === 'loading'
+                    ? 'loading'
+                    : status.kind === 'ok'
+                      ? 'ok'
+                      : ''
+              }`}
+              role="status"
+            >
+              {status.message}
+            </div>
+          ) : (
+            <p className="empty-hint" style={{ marginTop: 12 }}>
+              Dán ảnh để bắt đầu. Bấm quân rồi bấm ô muốn đi.
+            </p>
+          )}
+        </section>
+
+        <section className="panel">
+          <h2>Bàn cờ</h2>
+          <div className="board-wrap">
+            <Chessboard
+              options={{
+                id: 'advisor-board',
+                position: boardFen,
+                boardOrientation: orientation,
+                allowDragging: true,
+                allowDragOffBoard: false,
+                allowDrawingArrows: false,
+                arrows,
+                squareStyles,
+                clearArrowsOnPositionChange: true,
+                animationDurationInMs: 220,
+                boardStyle: {
+                  borderRadius: '10px',
+                  boxShadow: '0 10px 30px rgba(0,0,0,0.35)',
+                },
+                lightSquareStyle: { backgroundColor: '#d6c3a3' },
+                darkSquareStyle: { backgroundColor: '#7a5540' },
+                onSquareClick,
+                onPieceDrop,
+              }}
+            />
+          </div>
+
+          <div className="controls">
+            <div className="row" style={{ justifyContent: 'space-between' }}>
+              <div className="turn-toggle" role="group" aria-label="Đến lượt">
+                <button
+                  type="button"
+                  className={turn === 'white' ? 'active' : ''}
+                  onClick={() => changeTurn('white')}
+                >
+                  Trắng đi
+                </button>
+                <button
+                  type="button"
+                  className={turn === 'black' ? 'active' : ''}
+                  onClick={() => changeTurn('black')}
+                >
+                  Đen đi
+                </button>
+              </div>
+              <div className="row">
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={undoMove}
+                  disabled={!canUndo}
+                  title={canUndo ? 'Hoàn tác nước vừa đi' : 'Chưa có nước để hoàn tác'}
+                >
+                  Undo
+                </button>
+                <button type="button" className="btn" onClick={flipBoard}>
+                  Xoay bàn
+                </button>
+                <button type="button" className="btn" onClick={resetBoard}>
+                  Reset bàn
+                </button>
+              </div>
+            </div>
+
+            <p className="meta">
+              Bấm nhầm? Dùng <strong>Undo</strong>. Đi quân lúc nào cũng được — Stockfish tính lại.
+              {lastPlayed ? (
+                <>
+                  {' '}
+                  Vừa đi: <strong>{lastPlayed}</strong>
+                </>
+              ) : null}
+            </p>
+
+            {analysis ? (
+              <div className="suggestion">
+                <div className="meta">Gợi ý cho {turnLabel(analysis.turn)}</div>
+                <div className="suggestion-move">{analysis.best_move_san}</div>
+                <div className="eval-chip">
+                  Eval {analysis.evaluation.text}
+                  <span className="meta">· depth {analysis.depth}</span>
+                </div>
+                <p className="pv">{analysis.pv_san.join(' ')}</p>
+              </div>
+            ) : (
+              <p className="empty-hint">Chưa có gợi ý — upload ảnh hoặc đi một nước.</p>
+            )}
+
+            <div className="think-panel">
+              <div className="think-head">
+                <span className="meta">Suy nghĩ tự động</span>
+                <strong className="think-value">
+                  {elapsedLabel} / {MAX_THINK_S}s
+                </strong>
+              </div>
+              <div className="think-track" aria-hidden>
+                <div
+                  className={`think-fill ${thinking ? 'running' : ''}`}
+                  style={{ width: `${thinkProgress}%` }}
+                />
+              </div>
+              <div className="think-marks static">
+                <span>0s Nhanh</span>
+                <span>5s Sâu</span>
+                <span>10s Rất sâu</span>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  )
+}

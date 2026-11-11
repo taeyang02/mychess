@@ -1,0 +1,25 @@
+.DS_Store
+*.log
+
+# Python
+advisor/backend/.venv/
+advisor/backend/__pycache__/
+advisor/backend/**/__pycache__/
+*.pyc
+*.pyo
+
+# Frontend
+advisor/frontend/node_modules/
+advisor/frontend/dist/
+advisor/frontend/*.local
+
+# Stockfish local artifacts (download separately)
+stockfish/stockfish-macos-universal
+stockfish/src/*.nnue
+stockfish/src/*.o
+stockfish/src/stockfish
+
+# Editor
+.idea/
+.vscode/
+*.sw?
