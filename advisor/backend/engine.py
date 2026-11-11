@@ -167,6 +167,27 @@ def build_board(fen: str, turn: str | None = None) -> chess.Board:
     return board
 
 
+def build_analysis_board(
+    fen: str, turn: str | None, initial_fen: str | None, moves: list[str] | None,
+) -> chess.Board:
+    current = build_board(fen, turn=turn)
+    if initial_fen is None or not moves:
+        return current
+
+    try:
+        board = chess.Board(initial_fen)
+        if not board.is_valid():
+            raise ValueError("Invalid initial position")
+        for move in moves:
+            board.push_uci(move)
+    except ValueError as exc:
+        raise EngineError("Invalid FEN or move history") from exc
+
+    if board.fen() != current.fen():
+        raise EngineError("Invalid FEN or move history")
+    return board
+
+
 def format_score(score: chess.engine.PovScore, turn: chess.Color) -> dict[str, Any]:
     pov = score.pov(turn)
     if pov.is_mate():
@@ -184,6 +205,60 @@ def format_score(score: chess.engine.PovScore, turn: chess.Color) -> dict[str, A
         "value": cp,
         "text": f"{sign}{pawns:.2f}",
     }
+
+
+def _candidate_count(board: chess.Board) -> int:
+    # Three occurrences need at least eight reversible half-moves.
+    if len(board.move_stack) < 7 or board.halfmove_clock < 7:
+        return 1
+    for move in board.legal_moves:
+        board.push(move)
+        try:
+            if board.is_repetition(3):
+                return 3
+        finally:
+            board.pop()
+    return 1
+
+
+def _choose_line(board: chess.Board, lines: list[chess.engine.InfoDict]) -> chess.engine.InfoDict:
+    best = lines[0]
+    pv = best.get("pv")
+    score = best.get("score")
+    if len(lines) == 1 or not pv or score is None:
+        return best
+    best_cp = score.pov(board.turn).score()
+    if best_cp is None or not -20 <= best_cp <= 20:
+        return best
+
+    board.push(pv[0])
+    try:
+        repeats = board.is_repetition(3)
+    finally:
+        board.pop()
+    if not repeats:
+        return best
+
+    for candidate in lines[1:]:
+        alternative = candidate.get("pv")
+        score = candidate.get("score")
+        if (
+            not alternative
+            or score is None
+            or candidate.get("depth") != best.get("depth")
+            or any(candidate.get(bound) for bound in ("lowerbound", "upperbound"))
+        ):
+            continue
+        cp = score.pov(board.turn).score()
+        if cp is None or cp < max(0, best_cp - 20):
+            continue
+        board.push(alternative[0])
+        try:
+            if not board.can_claim_threefold_repetition():
+                return candidate
+        finally:
+            board.pop()
+    return best
 
 
 def _info_to_result(
@@ -248,8 +323,11 @@ async def analyze_position(
     depth: int | None = DEFAULT_DEPTH,
     movetime_ms: int | None = None,
     engine_path: str | Path | None = None,
+    *,
+    initial_fen: str | None = None,
+    moves: list[str] | None = None,
 ) -> dict[str, Any]:
-    board = build_board(fen, turn=turn)
+    board = build_analysis_board(fen, turn, initial_fen, moves)
     path = resolve_engine_path(engine_path)
 
     if movetime_ms is not None:
@@ -266,7 +344,8 @@ async def analyze_position(
     try:
         async with pool.lease(path) as engine:
             info = await asyncio.wait_for(
-                engine.analyse(board, limit, game=object()), timeout=15.0
+                engine.analyse(board, limit, game=object(), multipv=_candidate_count(board)),
+                timeout=15.0,
             )
     except BusyError:
         raise
@@ -279,7 +358,7 @@ async def analyze_position(
 
     return _info_to_result(
         board,
-        info,
+        _choose_line(board, info),
         mode=mode,
         elapsed_ms=int((time.monotonic() - started) * 1000),
         max_ms=think_ms,
@@ -293,9 +372,12 @@ async def iter_analyze_progressive(
     turn: str | None = None,
     max_time_s: float = 10.0,
     engine_path: str | Path | None = None,
+    *,
+    initial_fen: str | None = None,
+    moves: list[str] | None = None,
 ):
     """Yield analysis updates while Stockfish thinks up to max_time_s."""
-    board = build_board(fen, turn=turn)
+    board = build_analysis_board(fen, turn, initial_fen, moves)
     path = resolve_engine_path(engine_path)
     max_time_s = max(0.5, min(float(max_time_s), 10.0))
     max_ms = int(max_time_s * 1000)
@@ -307,7 +389,10 @@ async def iter_analyze_progressive(
     try:
         async with pool.lease(path) as engine:
             analysis = await asyncio.wait_for(
-                engine.analysis(board, chess.engine.Limit(time=max_time_s), game=object()),
+                engine.analysis(
+                    board, chess.engine.Limit(time=max_time_s),
+                    game=object(), multipv=_candidate_count(board),
+                ),
                 timeout=5.0,
             )
             deadline = time.monotonic() + max_time_s + 2.0
@@ -316,7 +401,7 @@ async def iter_analyze_progressive(
                     info = await asyncio.wait_for(analysis.next(), deadline - time.monotonic())
                     if info is None:
                         break
-                    if not info.get("pv"):
+                    if info.get("multipv", 1) != 1 or not info.get("pv"):
                         continue
                     final_info = info
                     now = time.monotonic()
@@ -334,6 +419,8 @@ async def iter_analyze_progressive(
                         max_ms=max_ms,
                         done=False,
                     )
+                if final_info is not None:
+                    final_info = _choose_line(board, analysis.multipv)
             except BaseException:
                 with CancelScope(shield=True):
                     analysis.stop()

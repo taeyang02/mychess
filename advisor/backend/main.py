@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from contextlib import aclosing, asynccontextmanager
-from typing import Literal
+from typing import Annotated, Literal
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -99,9 +99,17 @@ if ALLOWED_ORIGINS:
     )
 
 
+class MoveHistory(BaseModel):
+    initial_fen: str = Field(min_length=1, max_length=128)
+    moves: list[Annotated[str, Field(pattern=r"^[a-h][1-8][a-h][1-8][qrbn]?$")]] = Field(
+        min_length=1, max_length=512
+    )
+
+
 class AnalyzeRequest(BaseModel):
     fen: str = Field(..., min_length=1, max_length=128)
     turn: Literal["white", "black"] | None = None
+    history: MoveHistory | None = None
     depth: int | None = Field(default=None, ge=1, le=30)
     movetime_ms: int | None = Field(default=None, ge=50, le=10000)
     max_time_s: float = Field(default=10.0, ge=0.5, le=10.0)
@@ -153,6 +161,8 @@ async def analyze(request: Request, body: AnalyzeRequest) -> dict:
             turn=body.turn,
             depth=body.depth if body.movetime_ms is None else None,
             movetime_ms=body.movetime_ms,
+            initial_fen=body.history.initial_fen if body.history else None,
+            moves=body.history.moves if body.history else None,
         )
     except BusyError as exc:
         raise _busy_http(exc) from exc
@@ -179,6 +189,8 @@ async def analyze_stream(request: Request, body: AnalyzeRequest) -> StreamingRes
                 fen=body.fen,
                 turn=body.turn,
                 max_time_s=body.max_time_s,
+                initial_fen=body.history.initial_fen if body.history else None,
+                moves=body.history.moves if body.history else None,
             )) as updates:
                 async for update in updates:
                     yield json.dumps(update, ensure_ascii=False) + "\n"

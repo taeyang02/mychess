@@ -39,6 +39,8 @@ export type PlayedMove = {
   fen: string
   turn: Turn
   san: string
+  uci: string
+  before: string
 }
 
 export type LegalTarget = {
@@ -90,7 +92,13 @@ export function playLegalMove(
     })
     if (!move) return null
     const nextTurn: Turn = board.turn() === 'w' ? 'white' : 'black'
-    return { fen: board.fen(), turn: nextTurn, san: move.san }
+    return {
+      fen: board.fen(),
+      turn: nextTurn,
+      san: move.san,
+      uci: move.lan,
+      before: move.before,
+    }
   } catch {
     return null
   }

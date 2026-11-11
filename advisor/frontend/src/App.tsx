@@ -29,9 +29,22 @@ type BoardSnapshot = {
   fen: string
   turn: Turn
   lastPlayed: string | null
+  move: { before: string; after: string; uci: string }
 }
 
 const MAX_THINK_S = 10
+
+function analysisHistory(currentFen: string, history: BoardSnapshot[]) {
+  let initialFen = currentFen
+  const moves: string[] = []
+  for (let i = history.length - 1; i >= 0 && moves.length < 512; i--) {
+    const move = history[i].move
+    if (move.after !== initialFen) break
+    moves.push(move.uci)
+    initialFen = move.before
+  }
+  return moves.length ? { initial_fen: initialFen, moves: moves.reverse() } : undefined
+}
 
 function turnLabel(turn: Turn): string {
   return turn === 'white' ? 'Trắng' : 'Đen'
@@ -134,7 +147,12 @@ export default function App() {
     detectAbortRef.current = null
   }
 
-  async function runAnalyze(overrides?: { fen?: string; turn?: Turn; note?: string }) {
+  async function runAnalyze(overrides?: {
+    fen?: string
+    turn?: Turn
+    note?: string
+    history?: BoardSnapshot[]
+  }) {
     stopDetect()
     const nextTurn = overrides?.turn ?? turn
     const nextFen = normalizeFen(overrides?.fen ?? fen, nextTurn)
@@ -153,7 +171,12 @@ export default function App() {
 
     try {
       const final = await analyzeBoardStream(
-        { fen: nextFen, turn: nextTurn, max_time_s: MAX_THINK_S },
+        {
+          fen: nextFen,
+          turn: nextTurn,
+          max_time_s: MAX_THINK_S,
+          history: analysisHistory(nextFen, overrides?.history ?? []),
+        },
         (update) => {
           if (seq !== analyzeSeq.current) return
           // Only update suggestion — never overwrite board while user may already move on.
@@ -202,7 +225,13 @@ export default function App() {
     if (!played) return false
 
     // Save current position so user can undo a misclick.
-    setHistory((prev) => [...prev, { fen, turn, lastPlayed }])
+    const nextHistory = [...history, {
+      fen,
+      turn,
+      lastPlayed,
+      move: { before: played.before, after: played.fen, uci: played.uci },
+    }]
+    setHistory(nextHistory)
 
     // Invalidate in-flight updates + abort immediately — user can move anytime.
     analyzeSeq.current += 1
@@ -216,6 +245,7 @@ export default function App() {
     void runAnalyze({
       fen: played.fen,
       turn: played.turn,
+      history: nextHistory,
       note: `Bạn đi ${played.san} → đến lượt ${turnLabel(played.turn)}.`,
     })
     return true
@@ -224,7 +254,8 @@ export default function App() {
   function undoMove() {
     if (history.length === 0) return
     const prev = history[history.length - 1]
-    setHistory((h) => h.slice(0, -1))
+    const nextHistory = history.slice(0, -1)
+    setHistory(nextHistory)
 
     analyzeSeq.current += 1
     stopAnalyze()
@@ -237,6 +268,7 @@ export default function App() {
     void runAnalyze({
       fen: prev.fen,
       turn: prev.turn,
+      history: nextHistory,
       note: prev.lastPlayed
         ? `Đã hoàn tác — quay lại sau nước ${prev.lastPlayed}.`
         : 'Đã hoàn tác nước vừa đi.',
@@ -550,7 +582,7 @@ export default function App() {
                 <div className="meta">Gợi ý cho {turnLabel(analysis.turn)}</div>
                 <div className="suggestion-move">{analysis.best_move_san}</div>
                 <div className="eval-chip">
-                  Eval {analysis.evaluation.text}
+                  Điểm {turnLabel(analysis.turn)} {analysis.evaluation.text}
                   <span className="meta">· depth {analysis.depth}</span>
                 </div>
                 <p className="pv">{analysis.pv_san.join(' ')}</p>

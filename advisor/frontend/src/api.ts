@@ -66,6 +66,7 @@ export async function analyzeBoardStream(
     fen: string
     turn: Turn
     max_time_s?: number
+    history?: { initial_fen: string; moves: string[] }
   },
   onUpdate: (result: AnalyzeResult) => void,
   signal?: AbortSignal,
@@ -77,6 +78,7 @@ export async function analyzeBoardStream(
       fen: payload.fen,
       turn: payload.turn,
       max_time_s: payload.max_time_s ?? 10,
+      history: payload.history,
     }),
     signal,
   })
