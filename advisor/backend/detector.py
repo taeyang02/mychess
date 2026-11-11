@@ -12,6 +12,8 @@ from PIL import Image
 from chessvision import BoardDetector, BoardPredictor, Orientation, Turn
 from chessvision.detector import DetectedBoard
 
+from upload_security import UploadError, safe_filename, validate_and_load_image
+
 
 class DetectionError(Exception):
     """Raised when a board cannot be recognized from an image."""
@@ -130,11 +132,11 @@ def _apply_turn(fen: str, turn: str) -> str:
 
 def detect_position(image_bytes: bytes, filename: str = "board.png") -> dict[str, Any]:
     try:
-        image = Image.open(io.BytesIO(image_bytes))
-        image = image.convert("RGB")
-    except Exception as exc:  # noqa: BLE001
-        raise DetectionError(f"Cannot read image: {exc}") from exc
+        image = validate_and_load_image(image_bytes)
+    except UploadError as exc:
+        raise DetectionError(str(exc)) from exc
 
+    filename = safe_filename(filename)
     predictor = get_predictor()
     board_detector = get_board_detector()
 

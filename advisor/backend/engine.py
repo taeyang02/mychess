@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +10,13 @@ import chess
 import chess.engine
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_ENGINE_PATH = ROOT / "stockfish" / "stockfish-macos-universal"
+DEFAULT_ENGINE_CANDIDATES = (
+    ROOT / "stockfish" / "stockfish-macos-universal",
+    ROOT / "stockfish" / "stockfish-ubuntu-x86-64-avx2",
+    ROOT / "stockfish" / "stockfish",
+    Path("/usr/bin/stockfish"),
+    Path("/usr/local/bin/stockfish"),
+)
 DEFAULT_DEPTH = 16
 
 
@@ -18,11 +25,19 @@ class EngineError(Exception):
 
 
 def resolve_engine_path(path: str | Path | None = None) -> Path:
-    engine_path = Path(path) if path else DEFAULT_ENGINE_PATH
-    if not engine_path.exists():
-        raise EngineError(f"Stockfish binary not found: {engine_path}")
-    if not engine_path.is_file():
-        raise EngineError(f"Stockfish path is not a file: {engine_path}")
+    if path:
+        engine_path = Path(path)
+    else:
+        env_path = os.getenv("STOCKFISH_PATH", "").strip()
+        if env_path:
+            engine_path = Path(env_path)
+        else:
+            engine_path = next((p for p in DEFAULT_ENGINE_CANDIDATES if p.is_file()), None)
+            if engine_path is None:
+                raise EngineError("Chess engine unavailable on server")
+
+    if not engine_path.exists() or not engine_path.is_file():
+        raise EngineError("Chess engine unavailable on server")
     return engine_path
 
 
@@ -193,7 +208,7 @@ def analyze_position(
     path = resolve_engine_path(engine_path)
 
     if movetime_ms is not None:
-        think_ms = max(50, min(int(movetime_ms), 15000))
+        think_ms = max(50, min(int(movetime_ms), 10000))
         limit = chess.engine.Limit(time=think_ms / 1000.0)
         mode = "time"
     else:
@@ -202,9 +217,14 @@ def analyze_position(
         think_ms = None
         mode = "depth"
 
+    from limits import BusyError, engine_slot
+
     try:
-        with chess.engine.SimpleEngine.popen_uci(str(path)) as engine:
-            info = engine.analyse(board, limit, multipv=1)
+        with engine_slot():
+            with chess.engine.SimpleEngine.popen_uci(str(path)) as engine:
+                info = engine.analyse(board, limit, multipv=1)
+    except BusyError:
+        raise
     except chess.engine.EngineTerminatedError as exc:
         raise EngineError(f"Stockfish terminated unexpectedly: {exc}") from exc
     except Exception as exc:  # noqa: BLE001
@@ -232,9 +252,11 @@ def iter_analyze_progressive(
     """Yield analysis updates while Stockfish thinks up to max_time_s."""
     import time
 
+    from limits import BusyError, engine_slot
+
     board = build_board(fen, turn=turn)
     path = resolve_engine_path(engine_path)
-    max_time_s = max(0.5, min(float(max_time_s), 15.0))
+    max_time_s = max(0.5, min(float(max_time_s), 10.0))
     max_ms = int(max_time_s * 1000)
     started = time.monotonic()
     last_uci: str | None = None
@@ -243,37 +265,40 @@ def iter_analyze_progressive(
     final_info: chess.engine.InfoDict | None = None
 
     try:
-        with chess.engine.SimpleEngine.popen_uci(str(path)) as engine:
-            with engine.analysis(board, chess.engine.Limit(time=max_time_s)) as analysis:
-                for info in analysis:
-                    if "pv" not in info or not info["pv"]:
-                        continue
-                    final_info = info
-                    now = time.monotonic()
-                    elapsed_ms = int((now - started) * 1000)
-                    best_uci = info["pv"][0].uci()
-                    depth_now = int(info.get("depth") or 0)
+        with engine_slot():
+            with chess.engine.SimpleEngine.popen_uci(str(path)) as engine:
+                with engine.analysis(board, chess.engine.Limit(time=max_time_s)) as analysis:
+                    for info in analysis:
+                        if "pv" not in info or not info["pv"]:
+                            continue
+                        final_info = info
+                        now = time.monotonic()
+                        elapsed_ms = int((now - started) * 1000)
+                        best_uci = info["pv"][0].uci()
+                        depth_now = int(info.get("depth") or 0)
 
-                    # Emit when best move/depth changes, or every ~250ms for progress.
-                    should_emit = (
-                        best_uci != last_uci
-                        or depth_now > last_depth
-                        or (now - last_emit) >= 0.25
-                    )
-                    if not should_emit:
-                        continue
+                        # Emit when best move/depth changes, or every ~250ms for progress.
+                        should_emit = (
+                            best_uci != last_uci
+                            or depth_now > last_depth
+                            or (now - last_emit) >= 0.25
+                        )
+                        if not should_emit:
+                            continue
 
-                    last_uci = best_uci
-                    last_depth = depth_now
-                    last_emit = now
-                    yield _info_to_result(
-                        board,
-                        info,
-                        mode="progressive",
-                        elapsed_ms=min(elapsed_ms, max_ms),
-                        max_ms=max_ms,
-                        done=False,
-                    )
+                        last_uci = best_uci
+                        last_depth = depth_now
+                        last_emit = now
+                        yield _info_to_result(
+                            board,
+                            info,
+                            mode="progressive",
+                            elapsed_ms=min(elapsed_ms, max_ms),
+                            max_ms=max_ms,
+                            done=False,
+                        )
+    except BusyError:
+        raise
     except chess.engine.EngineTerminatedError as exc:
         raise EngineError(f"Stockfish terminated unexpectedly: {exc}") from exc
     except Exception as exc:  # noqa: BLE001

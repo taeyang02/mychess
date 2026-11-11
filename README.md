@@ -33,7 +33,39 @@ cp /tmp/stockfish/stockfish-macos-m1-apple-silicon stockfish/stockfish-macos-uni
 chmod +x stockfish/stockfish-macos-universal
 ```
 
-App tìm binary tại `stockfish/stockfish-macos-universal`.
+App tìm binary tại `stockfish/stockfish-macos-universal` (hoặc set `STOCKFISH_PATH`).
+
+## Deploy (production)
+
+Không chạy `uvicorn --reload` / không mở `--host 0.0.0.0` trực tiếp ra internet. Nên:
+
+1. Build frontend: `cd advisor/frontend && npm ci && npm run build`
+2. Serve `advisor/frontend/dist` bằng nginx/Caddy
+3. Proxy `/api/` → uvicorn (1–2 workers)
+4. TLS ở reverse proxy
+
+Ví dụ env backend:
+
+```bash
+export APP_ENV=production
+export ALLOWED_ORIGINS=https://your.domain
+export ALLOWED_HOSTS=your.domain,localhost
+export STOCKFISH_PATH=/usr/local/bin/stockfish
+export MAX_ENGINE_CONCURRENCY=2
+export MAX_DETECT_CONCURRENCY=1
+export ANALYZE_RATE_PER_MIN=30
+export DETECT_RATE_PER_MIN=20
+```
+
+Chạy API:
+
+```bash
+cd advisor/backend
+source .venv/bin/activate
+uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1
+```
+
+Bảo vệ sẵn có: rate limit theo IP, giới hạn Stockfish/detect concurrent, validate upload (magic bytes + pixel limit), tắt `/docs` khi `APP_ENV=production`, CORS theo `ALLOWED_ORIGINS`, security headers.
 
 ## Tính năng
 
