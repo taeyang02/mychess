@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+from anyio import CancelScope
+
 import chess
 import chess.engine
+
+from limits import BusyError, engine_slot
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ENGINE_CANDIDATES = (
@@ -39,6 +46,43 @@ def resolve_engine_path(path: str | Path | None = None) -> Path:
     if not engine_path.exists() or not engine_path.is_file():
         raise EngineError("Chess engine unavailable on server")
     return engine_path
+
+
+class EnginePool:
+    """Lease one UCI process per active analysis, up to the configured limit."""
+
+    def __init__(self) -> None:
+        self._idle: list[tuple[Path, asyncio.SubprocessTransport, chess.engine.UciProtocol]] = []
+
+    @asynccontextmanager
+    async def lease(self, path: Path):
+        with engine_slot():
+            while self._idle:
+                idle_path, transport, protocol = self._idle.pop()
+                if idle_path == path and transport.get_returncode() is None:
+                    break
+                transport.close()
+            else:
+                transport, protocol = await asyncio.wait_for(
+                    chess.engine.popen_uci(str(path)), timeout=5.0
+                )
+
+            try:
+                yield protocol
+            except BaseException:
+                # An interrupted UCI search can still have outstanding output.
+                transport.close()
+                raise
+            else:
+                if transport.get_returncode() is None:
+                    self._idle.append((path, transport, protocol))
+                else:
+                    transport.close()
+
+    def close(self) -> None:
+        while self._idle:
+            _, transport, _ = self._idle.pop()
+            transport.close()
 
 
 def build_board(fen: str, turn: str | None = None) -> chess.Board:
@@ -197,7 +241,8 @@ def _info_to_result(
     }
 
 
-def analyze_position(
+async def analyze_position(
+    pool: EnginePool,
     fen: str,
     turn: str | None = None,
     depth: int | None = DEFAULT_DEPTH,
@@ -217,101 +262,103 @@ def analyze_position(
         think_ms = None
         mode = "depth"
 
-    from limits import BusyError, engine_slot
-
+    started = time.monotonic()
     try:
-        with engine_slot():
-            with chess.engine.SimpleEngine.popen_uci(str(path)) as engine:
-                info = engine.analyse(board, limit, multipv=1)
+        async with pool.lease(path) as engine:
+            info = await asyncio.wait_for(
+                engine.analyse(board, limit, game=object()), timeout=15.0
+            )
     except BusyError:
         raise
     except chess.engine.EngineTerminatedError as exc:
         raise EngineError(f"Stockfish terminated unexpectedly: {exc}") from exc
-    except Exception as exc:  # noqa: BLE001
+    except TimeoutError as exc:
+        raise EngineError("Stockfish analysis timed out") from exc
+    except Exception as exc:
         raise EngineError(f"Stockfish analysis failed: {exc}") from exc
-
-    if isinstance(info, list):
-        info = info[0]
 
     return _info_to_result(
         board,
         info,
         mode=mode,
-        elapsed_ms=think_ms or 0,
+        elapsed_ms=int((time.monotonic() - started) * 1000),
         max_ms=think_ms,
         done=True,
     )
 
 
-def iter_analyze_progressive(
+async def iter_analyze_progressive(
+    pool: EnginePool,
     fen: str,
     turn: str | None = None,
     max_time_s: float = 10.0,
     engine_path: str | Path | None = None,
 ):
     """Yield analysis updates while Stockfish thinks up to max_time_s."""
-    import time
-
-    from limits import BusyError, engine_slot
-
     board = build_board(fen, turn=turn)
     path = resolve_engine_path(engine_path)
     max_time_s = max(0.5, min(float(max_time_s), 10.0))
     max_ms = int(max_time_s * 1000)
     started = time.monotonic()
     last_uci: str | None = None
-    last_depth = -1
     last_emit = 0.0
     final_info: chess.engine.InfoDict | None = None
 
     try:
-        with engine_slot():
-            with chess.engine.SimpleEngine.popen_uci(str(path)) as engine:
-                with engine.analysis(board, chess.engine.Limit(time=max_time_s)) as analysis:
-                    for info in analysis:
-                        if "pv" not in info or not info["pv"]:
-                            continue
-                        final_info = info
-                        now = time.monotonic()
-                        elapsed_ms = int((now - started) * 1000)
-                        best_uci = info["pv"][0].uci()
-                        depth_now = int(info.get("depth") or 0)
+        async with pool.lease(path) as engine:
+            analysis = await asyncio.wait_for(
+                engine.analysis(board, chess.engine.Limit(time=max_time_s), game=object()),
+                timeout=5.0,
+            )
+            deadline = time.monotonic() + max_time_s + 2.0
+            try:
+                while True:
+                    info = await asyncio.wait_for(analysis.next(), deadline - time.monotonic())
+                    if info is None:
+                        break
+                    if not info.get("pv"):
+                        continue
+                    final_info = info
+                    now = time.monotonic()
+                    best_uci = info["pv"][0].uci()
+                    if best_uci == last_uci and now - last_emit < 0.25:
+                        continue
 
-                        # Emit when best move/depth changes, or every ~250ms for progress.
-                        should_emit = (
-                            best_uci != last_uci
-                            or depth_now > last_depth
-                            or (now - last_emit) >= 0.25
-                        )
-                        if not should_emit:
-                            continue
-
-                        last_uci = best_uci
-                        last_depth = depth_now
-                        last_emit = now
-                        yield _info_to_result(
-                            board,
-                            info,
-                            mode="progressive",
-                            elapsed_ms=min(elapsed_ms, max_ms),
-                            max_ms=max_ms,
-                            done=False,
-                        )
+                    last_uci = best_uci
+                    last_emit = now
+                    yield _info_to_result(
+                        board,
+                        info,
+                        mode="progressive",
+                        elapsed_ms=int((now - started) * 1000),
+                        max_ms=max_ms,
+                        done=False,
+                    )
+            except BaseException:
+                with CancelScope(shield=True):
+                    analysis.stop()
+                    try:
+                        await asyncio.wait_for(analysis.wait(), timeout=0.5)
+                    except (TimeoutError, chess.engine.EngineError):
+                        pass
+                raise
     except BusyError:
         raise
     except chess.engine.EngineTerminatedError as exc:
         raise EngineError(f"Stockfish terminated unexpectedly: {exc}") from exc
-    except Exception as exc:  # noqa: BLE001
+    except TimeoutError as exc:
+        raise EngineError("Stockfish analysis timed out") from exc
+    except Exception as exc:
         raise EngineError(f"Stockfish analysis failed: {exc}") from exc
 
-    if final_info is None or not final_info.get("pv"):
+    if final_info is None:
         raise EngineError("No legal moves / Stockfish returned empty PV")
 
     yield _info_to_result(
         board,
         final_info,
         mode="progressive",
-        elapsed_ms=max_ms,
+        elapsed_ms=int((time.monotonic() - started) * 1000),
         max_ms=max_ms,
         done=True,
     )

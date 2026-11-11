@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from 'react'
 import { Chessboard } from 'react-chessboard'
-import type { PieceDropHandlerArgs, SquareHandlerArgs } from 'react-chessboard'
+import type { SquareHandlerArgs } from 'react-chessboard'
 import {
   analyzeBoardStream,
   detectBoard,
@@ -14,6 +14,7 @@ import {
   startingFen,
   type LegalTarget,
 } from './fen'
+import { boardPieces } from './boardPieces'
 import './App.css'
 
 type Status =
@@ -78,6 +79,7 @@ export default function App() {
   const boardFen = useMemo(() => normalizeFen(fen, turn), [fen, turn])
   const analyzeSeq = useRef(0)
   const abortRef = useRef<AbortController | null>(null)
+  const detectAbortRef = useRef<AbortController | null>(null)
   const canUndo = history.length > 0
 
   const squareStyles = useMemo(() => {
@@ -127,7 +129,13 @@ export default function App() {
     abortRef.current = null
   }
 
+  function stopDetect() {
+    detectAbortRef.current?.abort()
+    detectAbortRef.current = null
+  }
+
   async function runAnalyze(overrides?: { fen?: string; turn?: Turn; note?: string }) {
+    stopDetect()
     const nextTurn = overrides?.turn ?? turn
     const nextFen = normalizeFen(overrides?.fen ?? fen, nextTurn)
     const seq = ++analyzeSeq.current
@@ -153,6 +161,7 @@ export default function App() {
           const elapsed = update.elapsed_ms ?? 0
           const maxMs = update.max_ms ?? MAX_THINK_S * 1000
           setThinkProgress(Math.min(100, (elapsed / maxMs) * 100))
+          if (update.done) return
           setStatus({
             kind: 'loading',
             message: `Đang suy nghĩ ${(elapsed / 1000).toFixed(1)}s / ${MAX_THINK_S}s — gợi ý ${update.best_move_san} (depth ${update.depth})`,
@@ -260,29 +269,30 @@ export default function App() {
       return
     }
 
-    setPreviewUrl((prev) => {
-      if (prev?.startsWith('blob:')) URL.revokeObjectURL(prev)
-      return URL.createObjectURL(file)
-    })
+    stopDetect()
+    const controller = new AbortController()
+    detectAbortRef.current = controller
+    setPreviewUrl(URL.createObjectURL(file))
     setAnalysis(null)
     setLastPlayed(null)
     setHistory([])
     clearSelection()
+    analyzeSeq.current += 1
     stopAnalyze()
+    setThinking(false)
+    setThinkProgress(0)
     setStatus({ kind: 'loading', message: 'Đang nhận diện bàn cờ & bên đi…' })
 
     try {
-      const result = await detectBoard(file)
+      const result = await detectBoard(file, controller.signal)
+      if (controller.signal.aborted) return
       setFen(result.fen)
       setTurn(result.turn_guess)
       setOrientation(result.orientation === 'black' ? 'black' : 'white')
       setHistory([])
 
       if (result.board_preview) {
-        setPreviewUrl((prev) => {
-          if (prev?.startsWith('blob:')) URL.revokeObjectURL(prev)
-          return result.board_preview!
-        })
+        setPreviewUrl(result.board_preview)
       }
 
       if (!result.is_valid) {
@@ -299,10 +309,13 @@ export default function App() {
         note: `Đến lượt ${turnLabel(result.turn_guess)} — gợi ý sau khi suy nghĩ xong.`,
       })
     } catch (err) {
+      if (controller.signal.aborted) return
       setStatus({
         kind: 'error',
         message: err instanceof Error ? err.message : 'Không nhận diện được bàn cờ.',
       })
+    } finally {
+      if (detectAbortRef.current === controller) detectAbortRef.current = null
     }
   }
 
@@ -334,18 +347,6 @@ export default function App() {
     selectSquare(square)
   }
 
-  function onPieceDrop({ sourceSquare, targetSquare }: PieceDropHandlerArgs): boolean {
-    if (!targetSquare || sourceSquare === targetSquare) return false
-    const ok = applyPlayedMove(sourceSquare, targetSquare)
-    if (!ok) {
-      setStatus({
-        kind: 'error',
-        message: `Nước không hợp lệ. Đang đến lượt ${turnLabel(turn)}.`,
-      })
-    }
-    return ok
-  }
-
   function flipBoard() {
     setOrientation((prev) => (prev === 'white' ? 'black' : 'white'))
   }
@@ -358,8 +359,13 @@ export default function App() {
     void runAnalyze({ fen, turn: next })
   }
 
-  const handleFileRef = useRef(handleFile)
-  handleFileRef.current = handleFile
+  const handlePastedFile = useEffectEvent(handleFile)
+
+  useEffect(() => {
+    return () => {
+      if (previewUrl?.startsWith('blob:')) URL.revokeObjectURL(previewUrl)
+    }
+  }, [previewUrl])
 
   useEffect(() => {
     function onPaste(event: ClipboardEvent) {
@@ -378,7 +384,7 @@ export default function App() {
             : new File([file], `clipboard-${Date.now()}.png`, {
                 type: file.type || 'image/png',
               })
-        void handleFileRef.current(named)
+        void handlePastedFile(named)
         return
       }
     }
@@ -387,6 +393,7 @@ export default function App() {
     return () => {
       window.removeEventListener('paste', onPaste)
       stopAnalyze()
+      stopDetect()
     }
   }, [])
 
@@ -472,9 +479,9 @@ export default function App() {
               options={{
                 id: 'advisor-board',
                 position: boardFen,
+                pieces: boardPieces,
                 boardOrientation: orientation,
-                allowDragging: true,
-                allowDragOffBoard: false,
+                allowDragging: false,
                 allowDrawingArrows: false,
                 arrows,
                 squareStyles,
@@ -487,7 +494,6 @@ export default function App() {
                 lightSquareStyle: { backgroundColor: '#d6c3a3' },
                 darkSquareStyle: { backgroundColor: '#7a5540' },
                 onSquareClick,
-                onPieceDrop,
               }}
             />
           </div>

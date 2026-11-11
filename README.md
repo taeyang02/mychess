@@ -42,7 +42,7 @@ Không chạy `uvicorn --reload` / không mở `--host 0.0.0.0` trực tiếp ra
 1. Build frontend: `cd advisor/frontend && npm ci && npm run build`
 2. Serve `advisor/frontend/dist` bằng nginx/Caddy
 3. Proxy `/api/` → uvicorn (1–2 workers)
-4. TLS ở reverse proxy
+4. TLS ở reverse proxy. Để giới hạn theo IP hoạt động đúng, proxy cần ghi đè `X-Forwarded-For` bằng IP client đã xác thực. Chỉ cấu hình Uvicorn tin địa chỉ của reverse proxy qua `--forwarded-allow-ips`.
 
 Ví dụ env backend:
 
@@ -55,6 +55,7 @@ export MAX_ENGINE_CONCURRENCY=2
 export MAX_DETECT_CONCURRENCY=1
 export ANALYZE_RATE_PER_MIN=30
 export DETECT_RATE_PER_MIN=20
+export MAX_RATE_LIMIT_KEYS=10000
 ```
 
 Chạy API:
@@ -62,7 +63,7 @@ Chạy API:
 ```bash
 cd advisor/backend
 source .venv/bin/activate
-uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1
+uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1 --forwarded-allow-ips=127.0.0.1
 ```
 
 Bảo vệ sẵn có: rate limit theo IP, giới hạn Stockfish/detect concurrent, validate upload (magic bytes + pixel limit), tắt `/docs` khi `APP_ENV=production`, CORS theo `ALLOWED_ORIGINS`, security headers.

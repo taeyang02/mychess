@@ -12,7 +12,7 @@ from PIL import Image
 from chessvision import BoardDetector, BoardPredictor, Orientation, Turn
 from chessvision.detector import DetectedBoard
 
-from upload_security import UploadError, safe_filename, validate_and_load_image
+from upload_security import safe_filename, validate_and_load_image
 
 
 class DetectionError(Exception):
@@ -131,10 +131,7 @@ def _apply_turn(fen: str, turn: str) -> str:
 
 
 def detect_position(image_bytes: bytes, filename: str = "board.png") -> dict[str, Any]:
-    try:
-        image = validate_and_load_image(image_bytes)
-    except UploadError as exc:
-        raise DetectionError(str(exc)) from exc
+    image = validate_and_load_image(image_bytes)
 
     filename = safe_filename(filename)
     predictor = get_predictor()

@@ -4,17 +4,19 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import aclosing, asynccontextmanager
 from typing import Literal
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from detector import DetectionError, detect_position
-from engine import EngineError, analyze_position, iter_analyze_progressive
+from engine import EngineError, EnginePool, analyze_position, iter_analyze_progressive
 from errors import log_exception, public_engine_error
 from limits import (
     ANALYZE_RATE,
@@ -36,13 +38,32 @@ from upload_security import UploadError, safe_filename
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("advisor")
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    pool = EnginePool()
+    app.state.engine_pool = pool
+    try:
+        yield
+    finally:
+        pool.close()
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="Chess Move Advisor",
     version="1.0.0",
     docs_url="/docs" if ENABLE_DOCS else None,
     redoc_url="/redoc" if ENABLE_DOCS else None,
     openapi_url="/openapi.json" if ENABLE_DOCS else None,
 )
+
+
+class AnalysisStreamResponse(StreamingResponse):
+    async def stream_response(self, send):
+        # Also release the engine when sending is interrupted between updates.
+        async with aclosing(self.body_iterator):
+            await super().stream_response(send)
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -105,11 +126,11 @@ async def detect(request: Request, image: UploadFile = File(...)) -> dict:
 
     data = await image.read(MAX_UPLOAD_BYTES + 1)
     if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=400, detail="Image too large (max 8MB)")
+        raise HTTPException(status_code=400, detail=f"Image too large (max {MAX_UPLOAD_BYTES} bytes)")
 
     try:
         with detect_slot():
-            return detect_position(data, filename=safe_filename(image.filename))
+            return await run_in_threadpool(detect_position, data, filename=safe_filename(image.filename))
     except BusyError as exc:
         raise _busy_http(exc) from exc
     except DetectionError as exc:
@@ -122,11 +143,12 @@ async def detect(request: Request, image: UploadFile = File(...)) -> dict:
 
 
 @app.post("/api/analyze")
-def analyze(request: Request, body: AnalyzeRequest) -> dict:
+async def analyze(request: Request, body: AnalyzeRequest) -> dict:
     ip = client_ip(request)
     try:
         check_rate_limit(f"analyze:{ip}", ANALYZE_RATE)
-        return analyze_position(
+        return await analyze_position(
+            request.app.state.engine_pool,
             fen=body.fen,
             turn=body.turn,
             depth=body.depth if body.movetime_ms is None else None,
@@ -142,7 +164,7 @@ def analyze(request: Request, body: AnalyzeRequest) -> dict:
 
 
 @app.post("/api/analyze/stream")
-def analyze_stream(request: Request, body: AnalyzeRequest) -> StreamingResponse:
+async def analyze_stream(request: Request, body: AnalyzeRequest) -> StreamingResponse:
     """NDJSON stream: Stockfish thinks 0→max_time_s, emits updates when suggestion changes."""
     ip = client_ip(request)
     try:
@@ -150,14 +172,16 @@ def analyze_stream(request: Request, body: AnalyzeRequest) -> StreamingResponse:
     except BusyError as exc:
         raise _busy_http(exc) from exc
 
-    def generate():
+    async def generate():
         try:
-            for update in iter_analyze_progressive(
+            async with aclosing(iter_analyze_progressive(
+                request.app.state.engine_pool,
                 fen=body.fen,
                 turn=body.turn,
                 max_time_s=body.max_time_s,
-            ):
-                yield json.dumps(update, ensure_ascii=False) + "\n"
+            )) as updates:
+                async for update in updates:
+                    yield json.dumps(update, ensure_ascii=False) + "\n"
         except BusyError as exc:
             yield json.dumps({"error": str(exc), "done": True}, ensure_ascii=False) + "\n"
         except EngineError as exc:
@@ -169,4 +193,8 @@ def analyze_stream(request: Request, body: AnalyzeRequest) -> StreamingResponse:
             log_exception("analyze_stream", exc)
             yield json.dumps({"error": "Analysis failed", "done": True}, ensure_ascii=False) + "\n"
 
-    return StreamingResponse(generate(), media_type="application/x-ndjson")
+    return AnalysisStreamResponse(
+        generate(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

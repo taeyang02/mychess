@@ -48,22 +48,23 @@ def validate_and_load_image(data: bytes) -> Image.Image:
     _sniff_image(data)
 
     try:
-        image = Image.open(io.BytesIO(data))
-        image.load()  # force decode now (catches bombs / corrupt files)
+        with Image.open(io.BytesIO(data)) as image:
+            w, h = image.size
+            if w < 32 or h < 32:
+                raise UploadError("Image too small")
+            if w > MAX_IMAGE_SIDE or h > MAX_IMAGE_SIDE:
+                raise UploadError(f"Image too large (max {MAX_IMAGE_SIDE}px per side)")
+            if w * h > MAX_IMAGE_PIXELS:
+                raise UploadError("Image has too many pixels")
+
+            image.load()
+            return image.convert("RGB")
+    except UploadError:
+        raise
     except Image.DecompressionBombError as exc:
         raise UploadError("Image dimensions too large") from exc
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ValueError) as exc:
         raise UploadError("Cannot decode image") from exc
-
-    w, h = image.size
-    if w < 32 or h < 32:
-        raise UploadError("Image too small")
-    if w > MAX_IMAGE_SIDE or h > MAX_IMAGE_SIDE:
-        raise UploadError(f"Image too large (max {MAX_IMAGE_SIDE}px per side)")
-    if w * h > MAX_IMAGE_PIXELS:
-        raise UploadError("Image has too many pixels")
-
-    return image.convert("RGB")
 
 
 def safe_filename(name: str | None) -> str:

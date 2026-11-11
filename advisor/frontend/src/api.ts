@@ -53,10 +53,10 @@ async function readError(res: Response): Promise<string> {
   }
 }
 
-export async function detectBoard(file: File): Promise<DetectionResult> {
+export async function detectBoard(file: File, signal?: AbortSignal): Promise<DetectionResult> {
   const form = new FormData()
   form.append('image', file)
-  const res = await fetch('/api/detect', { method: 'POST', body: form })
+  const res = await fetch('/api/detect', { method: 'POST', body: form, signal })
   if (!res.ok) throw new Error(await readError(res))
   return res.json()
 }
@@ -86,32 +86,32 @@ export async function analyzeBoardStream(
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
-  let last: AnalyzeResult | null = null
-
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() || ''
-
-    for (const line of lines) {
-      const trimmed = line.trim()
-      if (!trimmed) continue
-      const data = JSON.parse(trimmed) as AnalyzeResult
-      if (data.error) throw new Error(data.error)
-      last = data
-      onUpdate(data)
-    }
-  }
-
-  const rest = buffer.trim()
-  if (rest) {
-    const data = JSON.parse(rest) as AnalyzeResult
+  function processLine(line: string): AnalyzeResult | undefined {
+    if (!line.trim()) return
+    const data = JSON.parse(line) as AnalyzeResult
     if (data.error) throw new Error(data.error)
-    last = data
     onUpdate(data)
+    return data.done ? data : undefined
   }
 
-  return last
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+      for (const line of lines) {
+        const final = processLine(line)
+        if (final) return final
+      }
+    }
+
+    const final = processLine(buffer + decoder.decode())
+    if (final) return final
+    throw new Error('Kết nối phân tích bị ngắt trước khi có kết quả cuối.')
+  } finally {
+    void reader.cancel().catch(() => undefined)
+    reader.releaseLock()
+  }
 }
