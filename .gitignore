@@ -5,6 +5,9 @@
 advisor/backend/.venv/
 advisor/backend/__pycache__/
 advisor/backend/**/__pycache__/
+lab/backend/.venv/
+lab/backend/__pycache__/
+lab/backend/**/__pycache__/
 *.pyc
 *.pyo
 
@@ -12,6 +15,9 @@ advisor/backend/**/__pycache__/
 advisor/frontend/node_modules/
 advisor/frontend/dist/
 advisor/frontend/*.local
+lab/frontend/node_modules/
+lab/frontend/dist/
+lab/frontend/*.local
 
 # Stockfish local artifacts (download separately)
 stockfish/stockfish-macos-universal

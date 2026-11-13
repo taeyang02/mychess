@@ -1,0 +1,37 @@
+{
+  "_comment": "SYNTHETIC illustrative report — not from a real accused player",
+  "analysis_id": "an_syntheticdemo01",
+  "game_id": "game_synthetic001",
+  "synthetic_demo": true,
+  "status": "completed",
+  "data_quality": {
+    "warnings": ["Marked synthetic/demo game — not real cheat evidence"],
+    "missing_fields": [],
+    "validated_moves": 12,
+    "analyzed_moves": 12
+  },
+  "metadata": {
+    "white": "HonestPlayerA",
+    "black": "HonestPlayerB",
+    "white_elo": 1620,
+    "black_elo": 1580,
+    "time_control": "600+0",
+    "platform": "offline"
+  },
+  "white": {
+    "avg_cp_loss": 42.5,
+    "top1_agreement": 0.5,
+    "anomaly_percentile": 61.2,
+    "anomaly_score": 0.82,
+    "calibrated_cheat_probability": null,
+    "confidence_note": "Anomaly score/percentile only — NOT a cheat probability."
+  },
+  "black": {
+    "avg_cp_loss": 55.1,
+    "top1_agreement": 0.41,
+    "anomaly_percentile": 48.0,
+    "anomaly_score": 0.55,
+    "calibrated_cheat_probability": null
+  },
+  "disclaimer": "Research / education tool. Outputs are anomaly scores and review flags, not cheat verdicts."
+}

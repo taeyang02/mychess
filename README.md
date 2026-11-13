@@ -2,6 +2,12 @@
 
 Upload / ⌘V ảnh bàn cờ (Chess.com, Lichess…) → nhận diện thế cờ → Stockfish gợi ý nước đi.
 
+## Anti-Cheat Lab v2 (separate app)
+
+Offline PGN research lab (human vs engine metrics + anomaly percentiles). **Does not modify** the Move Advisor UI/API.
+
+See [`lab/README.md`](lab/README.md) — API `:8100`, UI `:5174`.
+
 ## Chạy local
 
 ### Backend
