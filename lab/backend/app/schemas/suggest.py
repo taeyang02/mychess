@@ -13,6 +13,7 @@ class SuggestRequest(BaseModel):
     elo: int = Field(default=1500, ge=600, le=2800)
     depth: int = Field(default=14, ge=6, le=22)
     multipv: int = Field(default=5, ge=3, le=10)
+    max_time_s: float = Field(default=10.0, ge=0.5, le=10.0)
 
 
 class MoveLine(BaseModel):
@@ -30,6 +31,10 @@ class SuggestResponse(BaseModel):
     fen: str
     turn: Literal["white", "black"]
     elo_band: int
+    depth: int = 0
+    elapsed_ms: int = 0
+    max_ms: int = 0
+    done: bool = True
     engine: dict[str, Any]
     human: dict[str, Any]
     stockfish_best: MoveLine

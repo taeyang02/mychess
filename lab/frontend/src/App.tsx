@@ -3,7 +3,7 @@ import { Chessboard } from 'react-chessboard'
 import type { SquareHandlerArgs } from 'react-chessboard'
 import {
   detectBoard,
-  suggestBoard,
+  suggestBoardStream,
   type SuggestResult,
   type Turn,
 } from './api'
@@ -179,18 +179,28 @@ export default function App() {
     setThinkProgress(0)
     setStatus({
       kind: 'loading',
-      message: 'Stockfish + human-typical đang suy nghĩ…',
+      message: 'Stockfish đang suy nghĩ 0→10s (nông→sâu)…',
     })
 
     try {
-      const final = await suggestBoard(
-        { fen: nextFen, turn: nextTurn, elo: nextElo, depth: 14, multipv: 5 },
-        (elapsed, maxMs) => {
+      const final = await suggestBoardStream(
+        {
+          fen: nextFen,
+          turn: nextTurn,
+          elo: nextElo,
+          multipv: 5,
+          max_time_s: MAX_THINK_S,
+        },
+        (update) => {
           if (seq !== analyzeSeq.current) return
+          setSuggestion(update)
+          const elapsed = update.elapsed_ms ?? 0
+          const maxMs = update.max_ms ?? MAX_THINK_S * 1000
           setThinkProgress(Math.min(100, (elapsed / maxMs) * 100))
+          if (update.done) return
           setStatus({
             kind: 'loading',
-            message: `Đang suy nghĩ ${(elapsed / 1000).toFixed(1)}s / ${MAX_THINK_S}s…`,
+            message: `Đang suy nghĩ ${(elapsed / 1000).toFixed(1)}s / ${MAX_THINK_S}s — SF ${update.stockfish_best.san} (depth ${update.depth})`,
           })
         },
         controller.signal,
@@ -199,12 +209,16 @@ export default function App() {
       if (seq !== analyzeSeq.current) return null
       setThinking(false)
       setThinkProgress(100)
+      if (!final) {
+        setStatus({ kind: 'error', message: 'Không nhận được gợi ý từ Stockfish.' })
+        return null
+      }
       setSuggestion(final)
       setStatus({
         kind: 'ok',
         message:
           overrides?.note ??
-          `Đến lượt ${turnLabel(final.turn)} — SF ${final.stockfish_best.san} · Human ${final.human_typical.san}`,
+          `Đến lượt ${turnLabel(final.turn)} — SF ${final.stockfish_best.san} · Human ${final.human_typical.san} · ${(final.elapsed_ms / 1000).toFixed(1)}s depth ${final.depth}`,
       })
       return final
     } catch (err) {

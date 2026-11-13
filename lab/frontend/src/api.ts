@@ -39,6 +39,7 @@ export type SuggestResult = {
   human_typical: MoveLine
   human_lines: MoveLine[]
   disclaimer: string
+  error?: string
 }
 
 async function readError(res: Response): Promise<string> {
@@ -67,57 +68,69 @@ export async function detectBoard(file: File, signal?: AbortSignal): Promise<Det
   return res.json()
 }
 
-/** Suggest like ver1 analyze: abortable, reports progress while waiting. */
-export async function suggestBoard(
+/** Progressive Stockfish search 0→max_time_s with live dual suggestions. */
+export async function suggestBoardStream(
   payload: {
     fen: string
     turn: Turn
     elo: number
-    depth?: number
     multipv?: number
+    max_time_s?: number
   },
-  onProgress: (elapsedMs: number, maxMs: number) => void,
+  onUpdate: (result: SuggestResult) => void,
   signal?: AbortSignal,
-): Promise<SuggestResult> {
-  const maxMs = 10_000
-  const started = performance.now()
-  const tick = window.setInterval(() => {
-    const elapsed = performance.now() - started
-    onProgress(Math.min(elapsed, maxMs * 0.95), maxMs)
-  }, 120)
+): Promise<SuggestResult | null> {
+  const res = await fetch('/api/v1/suggest/stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      fen: payload.fen,
+      turn: payload.turn,
+      elo: payload.elo,
+      multipv: payload.multipv ?? 5,
+      max_time_s: payload.max_time_s ?? 10,
+    }),
+    signal,
+  })
+  if (!res.ok) throw new Error(await readError(res))
+  if (!res.body) throw new Error('No stream body')
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let last: SuggestResult | null = null
+
+  function processLine(line: string): SuggestResult | undefined {
+    if (!line.trim()) return
+    const data = JSON.parse(line) as SuggestResult
+    if (data.error) throw new Error(data.error)
+    onUpdate(data)
+    last = data
+    return data.done ? data : undefined
+  }
 
   try {
-    const res = await fetch('/api/v1/suggest', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        fen: payload.fen,
-        turn: payload.turn,
-        elo: payload.elo,
-        depth: payload.depth ?? 14,
-        multipv: payload.multipv ?? 5,
-      }),
-      signal,
-    })
-    if (!res.ok) throw new Error(await readError(res))
-    const data = await res.json()
-    const elapsed = Math.round(performance.now() - started)
-    onProgress(elapsed, maxMs)
-    return {
-      fen: data.fen,
-      turn: data.turn,
-      elo_band: data.elo_band,
-      depth: data.engine?.depth ?? payload.depth ?? 14,
-      elapsed_ms: elapsed,
-      max_ms: maxMs,
-      done: true,
-      stockfish_best: data.stockfish_best,
-      stockfish_lines: data.stockfish_lines,
-      human_typical: data.human_typical,
-      human_lines: data.human_lines,
-      disclaimer: data.disclaimer,
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+      for (const line of lines) {
+        const final = processLine(line)
+        if (final) return final
+      }
     }
+    const final = processLine(buffer + decoder.decode())
+    if (final) return final
+    if (last) {
+      last = { ...last, done: true }
+      onUpdate(last)
+      return last
+    }
+    throw new Error('Kết nối phân tích bị ngắt trước khi có kết quả cuối.')
   } finally {
-    window.clearInterval(tick)
+    void reader.cancel().catch(() => undefined)
+    reader.releaseLock()
   }
 }
