@@ -1,4 +1,4 @@
-name: lab-ci
+name: advisor-v2-ci
 
 on:
   push:

@@ -1,14 +1,13 @@
-<script setup lang="ts">
-</script>
+<script setup lang="ts"></script>
 
 <template>
   <div class="shell">
     <header class="topbar">
       <h1 class="brand">
-        Anti-Cheat Lab
-        <span>v2 · offline research</span>
+        Move Advisor
+        <span>v2 · Stockfish + human-typical</span>
       </h1>
-      <div class="badge">Not a cheat verdict engine</div>
+      <div class="badge">Educational · not anti-cheat evasion</div>
     </header>
     <router-view />
   </div>

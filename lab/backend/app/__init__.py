@@ -1,3 +1,3 @@
-"""Chess Human Behavior & Anti-Cheat Lab (offline research MVP)."""
+"""Move Advisor v2 — Stockfish + human-typical (Maia-style) suggestions."""
 
-__version__ = "0.1.0"
+__version__ = "2.0.0"

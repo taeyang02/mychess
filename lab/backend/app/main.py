@@ -1,4 +1,4 @@
-"""Anti-Cheat Lab API — separate process from Move Advisor."""
+"""Move Advisor v2 API."""
 
 from __future__ import annotations
 
@@ -12,15 +12,11 @@ from app.api.v1 import router as v1_router
 from app.config import settings
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("lab")
 
 app = FastAPI(
-    title="Chess Human Behavior & Anti-Cheat Lab",
+    title="Move Advisor v2",
     version=__version__,
-    description=(
-        "Offline research lab for human vs engine behavior. "
-        "No live-game move advice. Anomaly scores are not cheat verdicts."
-    ),
+    description="Stockfish best + human-typical (Maia-style) suggestions. Educational only.",
     docs_url="/docs" if settings.enable_docs else None,
     redoc_url="/redoc" if settings.enable_docs else None,
 )
@@ -40,7 +36,7 @@ app.include_router(v1_router)
 def health() -> dict:
     return {
         "status": "ok",
-        "service": "anticheat-lab",
+        "service": "move-advisor-v2",
         "version": __version__,
-        "advisor_untouched": True,
+        "advisor_v1_untouched": True,
     }

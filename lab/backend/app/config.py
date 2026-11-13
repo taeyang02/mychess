@@ -1,4 +1,4 @@
-"""Lab configuration — reproducible research defaults."""
+"""Advisor v2 configuration."""
 
 from __future__ import annotations
 
@@ -7,27 +7,22 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-ROOT = Path(__file__).resolve().parents[3]  # repo root (stock-2)
-LAB_ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="LAB_", extra="ignore")
 
     app_env: str = "development"
-    host: str = "127.0.0.1"
-    port: int = 8100
     allowed_origins: str = "http://127.0.0.1:5174,http://localhost:5174"
     stockfish_path: str = ""
     multipv: int = 5
-    analysis_depth: int = 12
-    analysis_movetime_ms: int | None = None
-    max_plies: int = 200
-    max_games_batch: int = 20
-    human_model_backend: str = "surrogate"  # surrogate | maia (maia optional)
+    analysis_depth: int = 14
+    human_model_backend: str = "surrogate"  # surrogate until Maia weights configured
     maia_weights_path: str = ""
-    seed: int = 42
+    default_elo: int = 1500
     enable_docs: bool = True
+    seed: int = 42
 
     @property
     def origins(self) -> list[str]:
@@ -49,10 +44,11 @@ def resolve_stockfish() -> Path:
             ROOT / "stockfish" / "stockfish",
             Path("/usr/bin/stockfish"),
             Path("/usr/local/bin/stockfish"),
+            Path("/usr/games/stockfish"),
         ]
         path = next((p for p in candidates if p and p.is_file()), None)
         if path is None:
-            raise FileNotFoundError("Stockfish binary not found; set LAB_STOCKFISH_PATH or STOCKFISH_PATH")
+            raise FileNotFoundError("Stockfish not found; set LAB_STOCKFISH_PATH or STOCKFISH_PATH")
     if not path.is_file():
         raise FileNotFoundError(f"Stockfish not found at {path}")
     return path

@@ -1,16 +1,15 @@
-"""Human move model.
+"""Human-typical move suggestions (Maia-style interface).
 
-MVP ships a documented Elo-conditioned *surrogate* policy derived from Stockfish
-MultiPV scores. This is NOT Maia-3 weights. When LAB_HUMAN_MODEL_BACKEND=maia and
-weights exist, a Maia-compatible loader can be plugged in without API changes.
+MVP: Elo-conditioned surrogate policy over Stockfish MultiPV.
+When LAB_MAIA_WEIGHTS_PATH + LAB_HUMAN_MODEL_BACKEND=maia are set, swap the
+sampler without changing the API.
 
-Surrogate purpose: offline statistical comparison of move likelihood vs engine
-preference across rating bands — not to evade anti-cheat systems.
+Purpose: educational “what a typical player at this Elo often plays”.
+Not for evading anti-cheat / lowering bot scores.
 """
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,33 +17,18 @@ import chess
 import numpy as np
 
 from app.config import settings
-from app.services.stockfish_worker import PositionAnalysis
+from app.services.stockfish_worker import EngineLine, PositionAnalysis
 
 ELO_BANDS = (800, 1000, 1200, 1400, 1600, 1800, 2000, 2200, 2400)
 
 
-def nearest_elo_band(elo: int | None) -> int:
-    if elo is None:
-        return 1600
+def nearest_elo_band(elo: int) -> int:
     return min(ELO_BANDS, key=lambda b: abs(b - elo))
 
 
 def _temperature_for_elo(elo: int) -> float:
-    """Higher temp → flatter distribution (weaker players)."""
-    # 800 → ~120, 2400 → ~35 (centipawn scale softmax)
-    return max(25.0, 160.0 - (elo - 800) * (125.0 / 1600.0))
-
-
-@dataclass
-class HumanPolicy:
-    backend: str
-    elo_band: int
-    probabilities: dict[str, float]  # uci -> p
-    entropy: float
-    played_probability: float | None
-    played_rank: int | None
-    surprisal: float | None
-    note: str
+    # Weaker → flatter; stronger → peakier around engine prefs
+    return max(28.0, 155.0 - (elo - 800) * (120.0 / 1600.0))
 
 
 def _softmax(scores: list[float], temperature: float) -> list[float]:
@@ -54,101 +38,92 @@ def _softmax(scores: list[float], temperature: float) -> list[float]:
     return (ex / ex.sum()).tolist()
 
 
-def policy_from_stockfish(
+@dataclass
+class HumanSuggestion:
+    elo_band: int
+    backend: str
+    lines: list[tuple[EngineLine, float]]  # line, probability
+    note: str
+
+
+def suggest_human_moves(
     board: chess.Board,
     analysis: PositionAnalysis,
-    played_uci: str,
-    elo: int | None,
-) -> HumanPolicy:
-    """Surrogate human policy: softmax over MultiPV CP with Elo temperature.
-
-    Moves outside MultiPV share a small residual mass uniformly over remaining
-    legal moves so surprisal is defined for all legal plays.
-    """
+    elo: int,
+) -> HumanSuggestion:
     elo_band = nearest_elo_band(elo)
     temp = _temperature_for_elo(elo_band)
-    legal = [m.uci() for m in board.legal_moves]
-    if not legal:
-        return HumanPolicy(
-            backend="surrogate",
-            elo_band=elo_band,
-            probabilities={},
-            entropy=0.0,
-            played_probability=None,
-            played_rank=None,
-            surprisal=None,
-            note="No legal moves",
+
+    if settings.human_model_backend == "maia" and settings.maia_weights_path:
+        # Hook reserved for real Maia/LC0 weights.
+        backend = "maia-pending-loader"
+        note = (
+            "Maia weights path configured but neural loader not bundled in MVP; "
+            "falling back to Elo surrogate over MultiPV."
+        )
+    else:
+        backend = "surrogate-stockfish-multipv"
+        note = (
+            "Human-typical list is an Elo-conditioned surrogate over Stockfish MultiPV "
+            "(Maia-compatible API). Install Maia weights later for neural priors. "
+            "Educational only — not an anti-cheat evasion aid."
         )
 
-    line_by_uci = {line.uci: line for line in analysis.lines}
-    # Score: prefer CP; mate in N as large positive/negative.
-    scored: list[tuple[str, float]] = []
+    scored: list[tuple[EngineLine, float]] = []
     for line in analysis.lines:
         if line.mate is not None:
             score = 10000.0 - abs(line.mate) * 100 if line.mate > 0 else -10000.0
         else:
             score = float(line.score_cp or 0)
-        scored.append((line.uci, score))
+        # Mild Elo noise: lower Elo prefers slightly safer/simpler (less extreme) scores
+        if elo_band <= 1400 and line.mate is None:
+            score = score * 0.85
+        scored.append((line, score))
 
-    if scored:
-        probs_top = _softmax([s for _, s in scored], temp)
-        probs = {uci: p for (uci, _), p in zip(scored, probs_top, strict=True)}
-        mass_top = sum(probs.values())
-        residual = max(0.0, 1.0 - mass_top) + 1e-9
-    else:
-        probs = {}
-        residual = 1.0
+    if not scored:
+        # Fallback: any legal move uniform
+        legal = list(board.legal_moves)
+        fake_lines: list[tuple[EngineLine, float]] = []
+        if legal:
+            p = 1.0 / len(legal)
+            move = legal[0]
+            try:
+                san = board.san(move)
+            except ValueError:
+                san = move.uci()
+            el = EngineLine(1, move.uci(), san, None, None, [move.uci()])
+            fake_lines.append((el, p))
+        return HumanSuggestion(elo_band, backend, fake_lines, note)
 
-    outside = [u for u in legal if u not in probs]
-    if outside:
-        share = residual / len(outside)
-        for u in outside:
-            probs[u] = share
-    else:
-        # Renormalize
-        total = sum(probs.values()) or 1.0
-        probs = {k: v / total for k, v in probs.items()}
-
-    # Entropy
-    entropy = -sum(p * math.log(p + 1e-12) for p in probs.values())
-
-    played_p = probs.get(played_uci)
-    surprisal = None if played_p is None else -math.log(played_p + 1e-12)
-
-    # Rank among legal by descending probability
-    ranked = sorted(probs.items(), key=lambda kv: kv[1], reverse=True)
-    played_rank = next((i + 1 for i, (u, _) in enumerate(ranked) if u == played_uci), None)
-
-    return HumanPolicy(
-        backend="surrogate-stockfish-multipv",
-        elo_band=elo_band,
-        probabilities={k: float(v) for k, v in list(probs.items())[:20]},
-        entropy=float(entropy),
-        played_probability=float(played_p) if played_p is not None else None,
-        played_rank=played_rank,
-        surprisal=float(surprisal) if surprisal is not None else None,
-        note=(
-            "Surrogate policy (not Maia-3). Install Maia weights and set "
-            "LAB_HUMAN_MODEL_BACKEND=maia for neural human priors."
-        ),
+    probs = _softmax([s for _, s in scored], temp)
+    ranked = sorted(
+        [(line, float(p)) for (line, _), p in zip(scored, probs, strict=True)],
+        key=lambda t: t[1],
+        reverse=True,
     )
+    # Re-rank for human list display
+    relabeled: list[tuple[EngineLine, float]] = []
+    for i, (line, p) in enumerate(ranked, start=1):
+        relabeled.append(
+            (
+                EngineLine(i, line.uci, line.san, line.score_cp, line.mate, line.pv),
+                p,
+            )
+        )
+
+    return HumanSuggestion(elo_band=elo_band, backend=backend, lines=relabeled, note=note)
 
 
-def describe_backend() -> dict[str, Any]:
-    backend = settings.human_model_backend
+def describe_backend(elo_band: int) -> dict[str, Any]:
     return {
-        "requested_backend": backend,
-        "active_backend": "surrogate-stockfish-multipv" if backend != "maia" else "maia-pending",
+        "requested_backend": settings.human_model_backend,
+        "active_backend": (
+            "surrogate-stockfish-multipv"
+            if not (settings.human_model_backend == "maia" and settings.maia_weights_path)
+            else "maia-pending-loader"
+        ),
+        "elo_band": elo_band,
         "elo_bands": list(ELO_BANDS),
         "maia_weights_configured": bool(settings.maia_weights_path),
-        "status": (
-            "tested-surrogate"
-            if backend != "maia"
-            else "proposed-maia-loader-needs-weights"
-        ),
-        "disclaimer": (
-            "Surrogate distributions approximate rating-conditioned move preference "
-            "for research baselines only. They are not claims about real player intent "
-            "and must not be used to optimize evasion of anti-cheat systems."
-        ),
+        "entropy_hint": "Higher Elo → peakier human-typical distribution",
     }
