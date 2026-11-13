@@ -4,7 +4,7 @@ Upload / ⌘V ảnh bàn cờ (Chess.com, Lichess…) → nhận diện thế c�
 
 ## Move Advisor v2 (separate app)
 
-Dual suggestions: **Stockfish best** + **human-typical (Maia-style by Elo)**. Educational only — does not modify Ver1 (`advisor/`).
+UI giống ver1 (ảnh/⌘V, click-to-move, undo) + gợi ý kép **Stockfish** + **human-typical (Maia-style)**. Không đụng Ver1.
 
 See [`lab/README.md`](lab/README.md) — API `:8100`, UI `:5174`.
 

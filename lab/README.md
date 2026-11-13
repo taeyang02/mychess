@@ -1,37 +1,28 @@
 # Move Advisor v2
 
-Dual suggestions for training:
+Giao diện giống **ver1** (upload/⌘V, click-to-move, undo/reset, progress bar) + gợi ý kép:
 
-1. **Stockfish** — strongest / eval / MultiPV  
-2. **Human-typical (Maia-style)** — Elo-band style suggestion  
+- **Stockfish** (mũi tên xanh)
+- **Human-typical / Maia-style** theo Elo (mũi tên vàng)
 
-Educational only. **Not** an anti-cheat evasion tool. Ver1 Move Advisor (`advisor/`) stays untouched.
+Ver1 (`advisor/`) không bị đụng.
 
-## Run
+## Chạy
 
 ```bash
-# API :8100
-cd lab/backend
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+# API v2 :8100
+cd lab/backend && source .venv/bin/activate
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8100
 
-# UI :5174
-cd lab/frontend
-npm install
-npm run dev
+# UI v2 :5174
+cd lab/frontend && npm install && npm run dev
 ```
 
-Open http://localhost:5174
+Nhận diện ảnh (`/api/detect`) proxy sang advisor ver1 `:8000` — cần chạy thêm ver1 backend nếu dùng upload ảnh:
 
-## API
-
-`POST /api/v1/suggest`
-
-```json
-{ "fen": "...", "elo": 1500, "depth": 14, "multipv": 5 }
+```bash
+cd advisor/backend && source .venv/bin/activate
+uvicorn main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Returns `stockfish_best` + `human_typical` (separate fields).
-
-Human model MVP = Elo surrogate over MultiPV. Set `LAB_HUMAN_MODEL_BACKEND=maia` + `LAB_MAIA_WEIGHTS_PATH` when real Maia weights are available.
+Không có ảnh vẫn dùng được: startpos → auto suggest → click đi quân.

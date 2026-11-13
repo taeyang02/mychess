@@ -4,20 +4,22 @@
   "version": "2.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --port 5174",
+    "dev": "vite --port 5174 --host 127.0.0.1",
     "build": "vite build",
     "preview": "vite preview --port 5174"
   },
   "dependencies": {
     "chess.js": "^1.4.0",
-    "chessground": "^9.2.1",
-    "vue": "^3.5.13",
-    "vue-router": "^4.5.0"
+    "react": "^19.3.1",
+    "react-chessboard": "^5.12.1",
+    "react-dom": "^19.3.1"
   },
   "devDependencies": {
-    "@vitejs/plugin-vue": "^5.2.1",
-    "typescript": "~5.7.2",
-    "vite": "^6.0.7",
-    "vue-tsc": "^2.2.0"
+    "@types/node": "^24.19.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "typescript": "~7.0.2",
+    "vite": "^8.3.6"
   }
 }
