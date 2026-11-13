@@ -631,11 +631,11 @@ export default function App() {
                   className={`suggestion human ${focus === 'human' ? 'focused' : ''}`}
                   onClick={() => setFocus('human')}
                 >
-                  <div className="meta">Human-typical ~{suggestion.elo_band}</div>
+                  <div className="meta">Human-typical ~{suggestion.elo_band} (không phải engine #1)</div>
                   <div className="suggestion-move">{suggestion.human_typical.san}</div>
                   <div className="eval-chip">
                     p≈{(suggestion.human_typical.probability ?? 0).toFixed(3)}
-                    <span className="meta"> · Maia-style</span>
+                    <span className="meta"> · club-style</span>
                   </div>
                   <p className="pv">{suggestion.human_typical.pv_san.join(' ')}</p>
                 </button>
