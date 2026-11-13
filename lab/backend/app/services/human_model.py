@@ -1,11 +1,10 @@
 """Human-typical move suggestions (Maia-style interface).
 
-MVP: Elo-conditioned surrogate policy over Stockfish MultiPV.
-When LAB_MAIA_WEIGHTS_PATH + LAB_HUMAN_MODEL_BACKEND=maia are set, swap the
-sampler without changing the API.
+MVP: Elo-conditioned surrogate over Stockfish MultiPV with deterministic
+Elo-noise so the top human pick can differ from Stockfish #1 (especially
+at lower ratings). Real Maia weights can replace this sampler later.
 
-Purpose: educational “what a typical player at this Elo often plays”.
-Not for evading anti-cheat / lowering bot scores.
+Educational only — not for evading anti-cheat / lowering bot scores.
 """
 
 from __future__ import annotations
@@ -31,11 +30,23 @@ def _temperature_for_elo(elo: int) -> float:
     return max(28.0, 155.0 - (elo - 800) * (120.0 / 1600.0))
 
 
+def _noise_sigma_for_elo(elo: int) -> float:
+    """Centipawn-scale logit noise. Lower Elo → more often ≠ Stockfish #1."""
+    # 800 → ~95, 2400 → ~8
+    return max(8.0, 95.0 - (elo - 800) * (87.0 / 1600.0))
+
+
 def _softmax(scores: list[float], temperature: float) -> list[float]:
     arr = np.asarray(scores, dtype=np.float64) / max(temperature, 1e-6)
     arr = arr - arr.max()
     ex = np.exp(arr)
     return (ex / ex.sum()).tolist()
+
+
+def _stable_rng(fen: str, elo_band: int) -> np.random.Generator:
+    # Deterministic per (position, elo band) so progressive updates stay stable.
+    material = abs(hash((fen.split()[0], elo_band, settings.seed))) % (2**32 - 1)
+    return np.random.default_rng(material)
 
 
 @dataclass
@@ -46,6 +57,33 @@ class HumanSuggestion:
     note: str
 
 
+def _engine_score(line: EngineLine) -> float:
+    if line.mate is not None:
+        return 10000.0 - abs(line.mate) * 100 if line.mate > 0 else -10000.0
+    return float(line.score_cp or 0)
+
+
+def _human_bias(board: chess.Board, line: EngineLine, elo_band: int) -> float:
+    """Soft preferences that can reorder vs pure engine ranking."""
+    try:
+        move = chess.Move.from_uci(line.uci)
+    except ValueError:
+        return 0.0
+
+    bias = 0.0
+    # Lower Elo: prefer captures / checks slightly less “quiet engine” moves? 
+    # Prefer developing / castling / captures as more “human-salient”.
+    if board.is_castling(move):
+        bias += 35.0 * (1.0 - (elo_band - 800) / 1600.0)
+    if board.is_capture(move):
+        bias += 18.0 * (1.0 - (elo_band - 800) / 2000.0)
+    if board.gives_check(move) and elo_band <= 1600:
+        bias += 12.0
+    # Stronger players track engine more closely — less bias
+    bias *= max(0.15, (2200 - elo_band) / 1400.0)
+    return bias
+
+
 def suggest_human_moves(
     board: chess.Board,
     analysis: PositionAnalysis,
@@ -53,9 +91,10 @@ def suggest_human_moves(
 ) -> HumanSuggestion:
     elo_band = nearest_elo_band(elo)
     temp = _temperature_for_elo(elo_band)
+    sigma = _noise_sigma_for_elo(elo_band)
+    rng = _stable_rng(board.fen(), elo_band)
 
     if settings.human_model_backend == "maia" and settings.maia_weights_path:
-        # Hook reserved for real Maia/LC0 weights.
         backend = "maia-pending-loader"
         note = (
             "Maia weights path configured but neural loader not bundled in MVP; "
@@ -64,49 +103,54 @@ def suggest_human_moves(
     else:
         backend = "surrogate-stockfish-multipv"
         note = (
-            "Human-typical list is an Elo-conditioned surrogate over Stockfish MultiPV "
-            "(Maia-compatible API). Install Maia weights later for neural priors. "
-            "Educational only — not an anti-cheat evasion aid."
+            "Human-typical can differ from Stockfish via Elo temperature + bias + "
+            "stable noise (Maia-compatible API). Educational only."
         )
 
-    scored: list[tuple[EngineLine, float]] = []
-    for line in analysis.lines:
-        if line.mate is not None:
-            score = 10000.0 - abs(line.mate) * 100 if line.mate > 0 else -10000.0
-        else:
-            score = float(line.score_cp or 0)
-        # Mild Elo noise: lower Elo prefers slightly safer/simpler (less extreme) scores
-        if elo_band <= 1400 and line.mate is None:
-            score = score * 0.85
-        scored.append((line, score))
-
-    if not scored:
-        # Fallback: any legal move uniform
+    if not analysis.lines:
         legal = list(board.legal_moves)
         fake_lines: list[tuple[EngineLine, float]] = []
         if legal:
-            p = 1.0 / len(legal)
             move = legal[0]
             try:
                 san = board.san(move)
             except ValueError:
                 san = move.uci()
             el = EngineLine(1, move.uci(), san, None, None, [move.uci()])
-            fake_lines.append((el, p))
+            fake_lines.append((el, 1.0))
         return HumanSuggestion(elo_band, backend, fake_lines, note)
 
-    probs = _softmax([s for _, s in scored], temp)
+    # Logits that are NOT a monotone transform of engine rank → can differ from SF#1
+    logits: list[float] = []
+    for line in analysis.lines:
+        base = _engine_score(line)
+        bias = _human_bias(board, line, elo_band)
+        noise = float(rng.normal(0.0, sigma))
+        logits.append(base + bias + noise)
+
+    probs = _softmax(logits, temp)
     ranked = sorted(
-        [(line, float(p)) for (line, _), p in zip(scored, probs, strict=True)],
+        [
+            (line, float(p), logit)
+            for line, p, logit in zip(analysis.lines, probs, logits, strict=True)
+        ],
         key=lambda t: t[1],
         reverse=True,
     )
-    # Re-rank for human list display
+
     relabeled: list[tuple[EngineLine, float]] = []
-    for i, (line, p) in enumerate(ranked, start=1):
+    for i, (line, p, _logit) in enumerate(ranked, start=1):
         relabeled.append(
             (
-                EngineLine(i, line.uci, line.san, line.score_cp, line.mate, line.pv),
+                EngineLine(
+                    i,
+                    line.uci,
+                    line.san,
+                    line.score_cp,
+                    line.mate,
+                    line.pv,
+                    line.depth,
+                ),
                 p,
             )
         )
@@ -125,5 +169,5 @@ def describe_backend(elo_band: int) -> dict[str, Any]:
         "elo_band": elo_band,
         "elo_bands": list(ELO_BANDS),
         "maia_weights_configured": bool(settings.maia_weights_path),
-        "entropy_hint": "Higher Elo → peakier human-typical distribution",
+        "entropy_hint": "Lower Elo → higher chance human-typical ≠ Stockfish best",
     }

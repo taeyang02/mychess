@@ -89,24 +89,36 @@ export default function App() {
   const detectAbortRef = useRef<AbortController | null>(null)
   const canUndo = history.length > 0
 
-  const activeMove = focus === 'engine' ? suggestion?.stockfish_best : suggestion?.human_typical
-  const activeSquares = uciSquares(activeMove?.uci)
-
   const squareStyles = useMemo(() => {
     const styles = buildOptionStyles(selectedSquare, moveTargets)
-    if (activeSquares) {
-      styles[activeSquares.from] = {
-        ...(styles[activeSquares.from] || {}),
-        boxShadow: 'inset 0 0 0 3px rgba(61, 220, 132, 0.55)',
+    if (!suggestion) return styles
+    const sf = uciSquares(suggestion.stockfish_best.uci)
+    const hu = uciSquares(suggestion.human_typical.uci)
+    const same = suggestion.human_typical.uci === suggestion.stockfish_best.uci
+    if (sf) {
+      styles[sf.from] = {
+        ...(styles[sf.from] || {}),
+        boxShadow: 'inset 0 0 0 3px rgba(61, 220, 132, 0.7)',
       }
-      styles[activeSquares.to] = {
-        ...(styles[activeSquares.to] || {}),
-        boxShadow: 'inset 0 0 0 3px rgba(61, 220, 132, 0.55)',
+      styles[sf.to] = {
+        ...(styles[sf.to] || {}),
+        boxShadow: 'inset 0 0 0 3px rgba(61, 220, 132, 0.7)',
+      }
+    }
+    if (hu && !same) {
+      styles[hu.from] = {
+        ...(styles[hu.from] || {}),
+        boxShadow: 'inset 0 0 0 3px rgba(232, 197, 107, 0.75)',
+      }
+      styles[hu.to] = {
+        ...(styles[hu.to] || {}),
+        boxShadow: 'inset 0 0 0 3px rgba(232, 197, 107, 0.75)',
       }
     }
     return styles
-  }, [selectedSquare, moveTargets, activeSquares])
+  }, [selectedSquare, moveTargets, suggestion])
 
+  // Always draw both proposals when they differ: green = SF, yellow = human.
   const arrows = useMemo(() => {
     if (!suggestion) return []
     const sf = uciSquares(suggestion.stockfish_best.uci)
@@ -117,21 +129,18 @@ export default function App() {
       list.push({
         startSquare: sf.from,
         endSquare: sf.to,
-        color:
-          focus === 'engine' || same
-            ? 'rgba(61, 220, 132, 0.95)'
-            : 'rgba(61, 220, 132, 0.35)',
+        color: 'rgba(61, 220, 132, 0.95)',
       })
     }
     if (hu && !same) {
       list.push({
         startSquare: hu.from,
         endSquare: hu.to,
-        color: focus === 'human' ? 'rgba(232, 197, 107, 0.95)' : 'rgba(232, 197, 107, 0.4)',
+        color: 'rgba(232, 197, 107, 0.95)',
       })
     }
     return list
-  }, [suggestion, focus])
+  }, [suggestion])
 
   function clearSelection() {
     setSelectedSquare(null)
@@ -592,6 +601,8 @@ export default function App() {
 
             <p className="meta">
               Bấm nhầm? <strong>Undo</strong>. Đi quân lúc nào cũng được — engine tính lại.
+              {' '}Mũi tên <strong style={{ color: '#3ddc84' }}>xanh = Stockfish</strong>,{' '}
+              <strong style={{ color: '#e8c56b' }}>vàng = Human</strong> (khi khác nhau vẽ cả hai).
               {lastPlayed ? (
                 <>
                   {' '}
